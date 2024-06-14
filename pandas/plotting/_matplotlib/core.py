@@ -107,7 +107,9 @@ def _color_in_style(style: str) -> bool:
     """
     Check if there is a color letter in the style string.
     """
-    return not set(mpl.colors.BASE_COLORS).isdisjoint(style)
+    from matplotlib.colors import BASE_COLORS
+
+    return not set(BASE_COLORS).isdisjoint(style)
 
 
 class MPLPlot(ABC):
@@ -174,6 +176,8 @@ class MPLPlot(ABC):
         style=None,
         **kwds,
     ) -> None:
+        import matplotlib.pyplot as plt
+
         # if users assign an empty list or tuple, raise `ValueError`
         # similar to current `df.box` and `df.hist` APIs.
         if by in ([], ()):
@@ -234,7 +238,7 @@ class MPLPlot(ABC):
             self.rot = self._default_rot
 
         if grid is None:
-            grid = False if secondary_y else mpl.rcParams["axes.grid"]
+            grid = False if secondary_y else plt.rcParams["axes.grid"]
 
         self.grid = grid
         self.legend = legend
@@ -494,6 +498,10 @@ class MPLPlot(ABC):
         return self._get_nseries(self.data)
 
     @final
+    def draw(self) -> None:
+        self.plt.draw_if_interactive()
+
+    @final
     def generate(self) -> None:
         self._compute_plot_data()
         fig = self.fig
@@ -562,8 +570,6 @@ class MPLPlot(ABC):
     @final
     @cache_readonly
     def _axes_and_fig(self) -> tuple[Sequence[Axes], Figure]:
-        import matplotlib.pyplot as plt
-
         if self.subplots:
             naxes = (
                 self.nseries if isinstance(self.subplots, bool) else len(self.subplots)
@@ -578,7 +584,7 @@ class MPLPlot(ABC):
                 layout_type=self._layout_type,
             )
         elif self.ax is None:
-            fig = plt.figure(figsize=self.figsize)
+            fig = self.plt.figure(figsize=self.figsize)
             axes = fig.add_subplot(111)
         else:
             fig = self.ax.get_figure()
@@ -912,6 +918,13 @@ class MPLPlot(ABC):
             ax = other_ax
         return ax, leg
 
+    @final
+    @cache_readonly
+    def plt(self):
+        import matplotlib.pyplot as plt
+
+        return plt
+
     _need_to_set_index = False
 
     @final
@@ -1206,9 +1219,9 @@ class MPLPlot(ABC):
     @final
     def _get_subplots(self, fig: Figure) -> list[Axes]:
         if Version(mpl.__version__) < Version("3.8"):
-            Klass = mpl.axes.Subplot
+            from matplotlib.axes import Subplot as Klass
         else:
-            Klass = mpl.axes.Axes
+            from matplotlib.axes import Axes as Klass
 
         return [
             ax
@@ -1373,7 +1386,7 @@ class ScatterPlot(PlanePlot):
         if c is not None and color is not None:
             raise TypeError("Specify exactly one of `c` and `color`")
         if c is None and color is None:
-            c_values = mpl.rcParams["patch.facecolor"]
+            c_values = self.plt.rcParams["patch.facecolor"]
         elif color is not None:
             c_values = color
         elif color_by_categorical:
@@ -1398,10 +1411,12 @@ class ScatterPlot(PlanePlot):
             cmap = None
 
         if color_by_categorical and cmap is not None:
+            from matplotlib import colors
+
             n_cats = len(self.data[c].cat.categories)
-            cmap = mpl.colors.ListedColormap([cmap(i) for i in range(cmap.N)])
+            cmap = colors.ListedColormap([cmap(i) for i in range(cmap.N)])
             bounds = np.linspace(0, n_cats, n_cats + 1)
-            norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
+            norm = colors.BoundaryNorm(bounds, cmap.N)
             # TODO: warn that we are ignoring self.norm if user specified it?
             #  Doesn't happen in any tests 2023-11-09
         else:
@@ -1661,6 +1676,8 @@ class LinePlot(MPLPlot):
             ax._stacker_neg_prior[stacking_id] += values  # type: ignore[attr-defined]
 
     def _post_plot_logic(self, ax: Axes, data) -> None:
+        from matplotlib.ticker import FixedLocator
+
         def get_label(i):
             if is_float(i) and i.is_integer():
                 i = int(i)
@@ -1674,7 +1691,7 @@ class LinePlot(MPLPlot):
             xticklabels = [get_label(x) for x in xticks]
             # error: Argument 1 to "FixedLocator" has incompatible type "ndarray[Any,
             # Any]"; expected "Sequence[float]"
-            ax.xaxis.set_major_locator(mpl.ticker.FixedLocator(xticks))  # type: ignore[arg-type]
+            ax.xaxis.set_major_locator(FixedLocator(xticks))  # type: ignore[arg-type]
             ax.set_xticklabels(xticklabels)
 
         # If the index is an irregular time series, then by default
@@ -1779,7 +1796,7 @@ class AreaPlot(LinePlot):
 
 class BarPlot(MPLPlot):
     @property
-    def _kind(self) -> Literal["bar", "barh"]:
+    def _kind(self) -> Literal["bar"]:
         return "bar"
 
     _default_rot = 90
@@ -1981,10 +1998,64 @@ class BarhPlot(BarPlot):
     @property
     def orientation(self) -> Literal["horizontal"]:
         return "horizontal"
+    
+    def __init__(
+        self,
+        data,
+        *,
+        align="center",
+        bottom=0,
+        left=0,
+        width=0.5,
+        position=0.5,
+        log=False,
+        **kwargs,
+    ) -> None:
+        # we have to treat a series differently than a
+        # 1-column DataFrame w.r.t. color handling
+        self._is_series = isinstance(data, ABCSeries)
+        self.bar_width = width
+        self._align = align
+        self._position = position
+        self.tick_pos = np.arange(len(data))
 
-    @property
-    def _start_base(self):
-        return self.left
+        if is_list_like(bottom):
+            bottom = np.array(bottom)
+        if is_list_like(left):
+            left = np.array(left)
+        self.bottom = bottom
+        self.left = left
+
+        self.log = log
+
+        MPLPlot.__init__(self, data, **kwargs)
+
+    @cache_readonly
+    def ax_pos(self) -> np.ndarray:
+        return self.tick_pos - self.tickoffset
+
+    @cache_readonly
+    def tickoffset(self):
+        if self.stacked or self.subplots:
+            return self.bar_width * self._position
+        elif self._align == "edge":
+            w = self.bar_width / self.nseries
+            return self.bar_width * (self._position - 0.5) + w * 0.5
+        else:
+            return self.bar_width * self._position
+
+    @cache_readonly
+    def lim_offset(self):
+        if self.stacked or self.subplots:
+            if self._align == "edge":
+                return self.bar_width / 2
+            else:
+                return 0
+        elif self._align == "edge":
+            w = self.bar_width / self.nseries
+            return w * 0.5
+        else:
+            return 0
 
     # error: Signature of "_plot" incompatible with supertype "MPLPlot"
     @classmethod
@@ -1999,6 +2070,88 @@ class BarhPlot(BarPlot):
         **kwds,
     ):
         return ax.barh(x, y, w, left=start, log=log, **kwds)
+
+    @property
+    def _start_base(self):
+        return self.left
+    
+    def _make_plot(self, fig: Figure) -> None:
+        colors = self._get_colors()
+        colors = colors[::-1]
+        ncolors = len(colors)
+
+        pos_prior = neg_prior = np.zeros(len(self.data))
+        K = self.nseries
+
+        data = self.data.fillna(0)
+        data_list = list(enumerate(self._iter_data(data=data)))
+        for i, (label, y) in reversed(data_list): # We need to reverse the data_list to match the order of the data
+            ax = self._get_ax(i)
+            kwds = self.kwds.copy()
+            if self._is_series:
+                kwds["color"] = colors
+            elif isinstance(colors, dict):
+                kwds["color"] = colors[label]
+            else:
+                kwds["color"] = colors[i % ncolors]
+
+            errors = self._get_errorbars(label=label, index=i)
+            kwds = dict(kwds, **errors)
+
+            label = pprint_thing(label)
+            label = self._mark_right_label(label, index=i)
+
+            if (("yerr" in kwds) or ("xerr" in kwds)) and (kwds.get("ecolor") is None):
+                kwds["ecolor"] = mpl.rcParams["xtick.color"]
+
+            start = 0
+            if self.log and (y >= 1).all():
+                start = 1
+            start = start + self._start_base
+
+            kwds["align"] = self._align
+            if self.subplots:
+                w = self.bar_width / 2
+                rect = self._plot(
+                    ax,
+                    self.ax_pos + w,
+                    y,
+                    self.bar_width,
+                    start=start,
+                    label=label,
+                    log=self.log,
+                    **kwds,
+                )
+                ax.set_title(label)
+            elif self.stacked:
+                mask = y > 0
+                start = np.where(mask, pos_prior, neg_prior) + self._start_base
+                w = self.bar_width / 2
+                rect = self._plot(
+                    ax,
+                    self.ax_pos + w,
+                    y,
+                    self.bar_width,
+                    start=start,
+                    label=label,
+                    log=self.log,
+                    **kwds,
+                )
+                pos_prior = pos_prior + np.where(mask, y, 0)
+                neg_prior = neg_prior + np.where(mask, 0, y)
+            else:
+                w = self.bar_width / K
+                rect = self._plot(
+                    ax,
+                    self.ax_pos + (i + 0.5) * w,
+                    y,
+                    w,
+                    start=start,
+                    label=label,
+                    log=self.log,
+                    **kwds,
+                )
+            self._append_legend_handles_labels(rect, label)
 
     def _get_custom_index_name(self):
         return self.ylabel
