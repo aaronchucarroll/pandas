@@ -1315,7 +1315,8 @@ class PlotAccessor(PandasObject):
         """
         if color is not None:
             kwargs["color"] = color
-        self._parent = self._parent.reindex(columns=self._parent.columns[::-1])
+        if isinstance(self._parent, ABCDataFrame):
+            self._parent = self._parent.reindex(columns=self._parent.columns[::-1])
         return self(kind="barh", x=x, y=y, **kwargs)
 
     def box(self, by: IndexLabel | None = None, **kwargs) -> PlotAccessor:
